@@ -884,6 +884,36 @@
     return d.articles || [];
   }
 
+  // ── GOOGLE NEWS RSS (Napster panel) ───────────────────
+  async function fetchNapsterRSS() {
+    const rssUrl = 'https://news.google.com/rss/search?q=%22Napster%22&hl=en-US&gl=US&ceid=US:en';
+    const url = `${CORS_PROXY}${encodeURIComponent(rssUrl)}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(12000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const text = await r.text();
+    const xml  = new DOMParser().parseFromString(text, 'text/xml');
+    return Array.from(xml.querySelectorAll('item')).map(item => {
+      const rawTitle  = item.querySelector('title')?.textContent || '';
+      const sourceEl  = item.querySelector('source');
+      const sourceName = sourceEl?.textContent?.trim() || '';
+      // Google News appends " - Source Name" to the headline — strip it
+      const title = (sourceName && rawTitle.endsWith(' - ' + sourceName))
+        ? rawTitle.slice(0, -(sourceName.length + 3))
+        : rawTitle;
+      const link = item.getElementsByTagName('link')[0]?.textContent?.trim() || '';
+      const desc = (item.querySelector('description')?.textContent || '')
+        .replace(/<[^>]*>/g, '').trim();
+      const pubDate = item.querySelector('pubDate')?.textContent || '';
+      return {
+        title,
+        url: link,
+        description: desc,
+        source: { name: sourceName },
+        publishedAt: pubDate ? new Date(pubDate).toISOString() : '',
+      };
+    });
+  }
+
   // ── SORT & DEDUP ───────────────────────────────────────
   function sortByCredibility(articles) {
     return [...articles].sort((a,b) => getSourceScore(b.source?.name) - getSourceScore(a.source?.name));
@@ -1139,8 +1169,8 @@
   async function loadNapster() {
     showLoading('napster-articles', 'Fetching Napster news…');
     try {
-      const articles = await fetchNews('Napster');
-      renderCards(sortByCredibility(articles), 'napster-articles', 'napster-count');
+      const articles = await fetchNapsterRSS();
+      renderCards(sortByCredibility(dedup(articles)), 'napster-articles', 'napster-count');
     } catch (err) {
       showError('napster-articles', 'napster-count', err);
     }
