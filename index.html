@@ -885,33 +885,55 @@
   }
 
   // ── GOOGLE NEWS RSS (Napster panel) ───────────────────
-  async function fetchNapsterRSS() {
-    const rssUrl = 'https://news.google.com/rss/search?q=%22Napster%22&hl=en-US&gl=US&ceid=US:en';
-    const url = `${CORS_PROXY}${encodeURIComponent(rssUrl)}`;
-    const r = await fetch(url, { signal: AbortSignal.timeout(12000) });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const text = await r.text();
-    const xml  = new DOMParser().parseFromString(text, 'text/xml');
+  // Two proxies — try first, fall back to second on any network/5xx error
+  const RSS_PROXIES = [
+    url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  ];
+
+  async function fetchWithFallback(targetUrl) {
+    let lastErr;
+    for (const proxy of RSS_PROXIES) {
+      try {
+        const r = await fetch(proxy(targetUrl), { signal: AbortSignal.timeout(12000) });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return await r.text();
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr;
+  }
+
+  function parseRSSItems(text) {
+    const xml = new DOMParser().parseFromString(text, 'text/xml');
     return Array.from(xml.querySelectorAll('item')).map(item => {
-      const rawTitle  = item.querySelector('title')?.textContent || '';
-      const sourceEl  = item.querySelector('source');
+      const rawTitle   = item.querySelector('title')?.textContent || '';
+      const sourceEl   = item.querySelector('source');
       const sourceName = sourceEl?.textContent?.trim() || '';
-      // Google News appends " - Source Name" to the headline — strip it
       const title = (sourceName && rawTitle.endsWith(' - ' + sourceName))
         ? rawTitle.slice(0, -(sourceName.length + 3))
         : rawTitle;
-      const link = item.getElementsByTagName('link')[0]?.textContent?.trim() || '';
-      const desc = (item.querySelector('description')?.textContent || '')
-        .replace(/<[^>]*>/g, '').trim();
+      const link    = item.getElementsByTagName('link')[0]?.textContent?.trim() || '';
+      const desc    = (item.querySelector('description')?.textContent || '').replace(/<[^>]*>/g, '').trim();
       const pubDate = item.querySelector('pubDate')?.textContent || '';
-      return {
-        title,
-        url: link,
-        description: desc,
-        source: { name: sourceName },
-        publishedAt: pubDate ? new Date(pubDate).toISOString() : '',
-      };
+      const iso     = pubDate ? new Date(pubDate).toISOString() : '';
+      return { title, url: link, description: desc, source: { name: sourceName }, publishedAt: iso };
     });
+  }
+
+  async function fetchNapsterRSS() {
+    // Build "after:" date for the first day of the current month
+    const now        = new Date();
+    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+    const rssUrl = `https://news.google.com/rss/search?q=%22Napster%22+after:${monthStart}&hl=en-US&gl=US&ceid=US:en`;
+
+    const text     = await fetchWithFallback(rssUrl);
+    const articles = parseRSSItems(text);
+
+    // Keep only articles published in the current month, sorted newest first
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    return articles
+      .filter(a => a.publishedAt && new Date(a.publishedAt).getTime() >= startOfMonth)
+      .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
   }
 
   // ── SORT & DEDUP ───────────────────────────────────────
@@ -1170,7 +1192,7 @@
     showLoading('napster-articles', 'Fetching Napster news…');
     try {
       const articles = await fetchNapsterRSS();
-      renderCards(sortByCredibility(dedup(articles)), 'napster-articles', 'napster-count');
+      renderCards(dedup(articles), 'napster-articles', 'napster-count');
     } catch (err) {
       showError('napster-articles', 'napster-count', err);
     }
